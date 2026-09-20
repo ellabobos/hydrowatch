@@ -20,6 +20,15 @@
     "cache_hours": 6,
     "timeout_s": 20
   },
+  "imerg": {
+    "base_url": "https://arthurhouftp.pps.eosdis.nasa.gov/v1/imerg/early",
+    "versions": ["V08A", "V07B"],
+    "granule_latency_min": 240,
+    "window_h": 3,
+    "sat_anchor_mm_h": 6.0,
+    "timeout_s": 120,
+    "cache_dir": ".imerg"
+  },
   "open_meteo": {
     "base_url": "https://api.open-meteo.com/v1/forecast",
     "cache_minutes": 15,
@@ -36,5 +45,6 @@
     "forecast_rain_24h_mm": 10.0,
     "rapid_rise_s": 10
   },
-  "alert_cooldown_s": 60
+  "alert_cooldown_s": 60,
+  "manual_sky_ttl_h": 24
 }

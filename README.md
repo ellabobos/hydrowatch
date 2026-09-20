@@ -55,6 +55,7 @@ rate-limits alerts (`alert_cooldown_s`).
 | `server.py` | Node backend: serial reader, weather layers, engine, HTTP + SSE API |
 | `alert_engine.py` | Thresholds, water level/rise rate, fusion, alert log |
 | `nasa_precip.py` | NASA POWER daily precipitation (GPM-aligned), cached, offline-tolerant |
+| `imerg.py` | GPM IMERG **Early run** half-hourly satellite precipitation (0.1° pixel, ~4 h latency) — preferred observed-rain source; falls back to POWER daily until `imerg_creds.json` holds free NASA Earthdata credentials |
 | `open_meteo.py` | Open-Meteo hourly forecast (next 6/24 h rain), cached |
 | `config.json` | Node identity, location, serial/HTTP ports, all thresholds |
 | `static/` | Dashboard (vanilla HTML/JS/CSS, canvas charts, no build step) |

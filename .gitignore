@@ -1,0 +1,19 @@
+# HydroWatch secrets and local caches — never commit
+imerg_creds.json
+.imerg/
+.nasa_precip_cache.json
+.open_meteo_cache.json
+cookies*
+server.log
+server.log.err
+__pycache__/
+.venv*/
+.freebuff/
+
+# local runtime state (recaptured per-node at deployment)
+baseline.json
+manual_sky.json
+
+# OS junk
+.DS_Store
+Thumbs.db

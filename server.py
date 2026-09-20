@@ -26,6 +26,7 @@ from pathlib import Path
 import serial
 
 from alert_engine import AlertEngine
+import imerg
 import nasa_precip
 import open_meteo
 
@@ -45,12 +46,14 @@ LINE_RE = re.compile(
     r"(?:\s*\|\s*az=(-?\d+))?"
     r"(?:\s*\|\s*p_flood=(-?\d+(?:\.\d+)?))?"
     r"(?:\s*\|\s*mcls=(-?\d+))?"
+    r"(?:\s*\|\s*imu_peak=(-?\d+))?"
+    r"(?:\s*\|\s*buzz=(on|off))?"
 )
 
 latest = {
     "moisture": None, "distance_mm": None, "humidity": None, "temp_c": None,
     "ax": None, "ay": None, "az": None, "t": None,
-    "p_flood": None, "mcls": None,
+    "p_flood": None, "mcls": None, "imu_peak": None, "buzz": None,
 }
 serial_ok = False
 ser_port = None          # shared handle so sky_writer can talk to the MCU
@@ -61,6 +64,36 @@ subs_lock = threading.Lock()
 loc = CONFIG["node"]["location"]
 engine = AlertEngine(TH, COOLDOWN)
 weather = {"nasa": None, "forecast": None}
+
+# ---- Manual weather override (for offline deployment: no WiFi) ----
+MANUAL_SKY_FILE = Path(__file__).parent / "manual_sky.json"
+MANUAL_TTL_H = CONFIG.get("manual_sky_ttl_h", 24)
+
+
+def manual_sky() -> dict | None:
+    """Active manual weather override, or None (absent or expired)."""
+    try:
+        m = json.loads(MANUAL_SKY_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if time.time() - m.get("set_at", 0) > MANUAL_TTL_H * 3600:
+        return None
+    return m
+
+
+def effective_weather() -> tuple[dict, dict]:
+    """(nasa, forecast) dicts as the engine + sky should see them: the
+    manual override wins while active, auto layers otherwise."""
+    m = manual_sky()
+    if m:
+        obs = m.get("observed_mm_day") or 0.0
+        today = time.strftime("%Y%m%d")
+        return (
+            {"last_7d_mm": obs, "days": {today: obs}},
+            {"rain_next_6h_mm": m.get("forecast_mm_6h") or 0.0,
+             "rain_next_24h_mm": m.get("forecast_mm_24h") or 0.0},
+        )
+    return weather["nasa"] or {}, weather["forecast"] or {}
 
 
 def broadcast(msg: dict) -> None:
@@ -105,10 +138,17 @@ def serial_reader() -> None:
                             "az": int(m.group(7)) if m.group(7) is not None else None,
                             "p_flood": float(m.group(8)) if m.group(8) is not None else None,
                             "mcls": int(m.group(9)) if m.group(9) is not None else None,
+                            "imu_peak": int(m.group(10)) if m.group(10) is not None else None,
+                            "buzz": (m.group(11) == "on") if m.group(11) is not None else None,
                             "t": time.time(),
                         }
                         latest.update(sample)
-                        engine.ingest(sample, weather["nasa"] or {}, weather["forecast"] or {})
+                        nasa_eff, fc_eff = effective_weather()
+                        try:
+                            engine.ingest(sample, nasa_eff, fc_eff)
+                        except Exception as e:
+                            # a bug in the engine must never kill the data stream
+                            print(f"[engine] ingest error: {e}")
                         broadcast({"type": "sample", **sample, **engine_status_public()})
         except (serial.SerialException, OSError) as e:
             serial_ok = False
@@ -134,22 +174,59 @@ HEAVY_6H_MM = 10.0    # forecast rain: 10 mm in 6 h -> fc = 1.0
 
 
 def compute_sky() -> dict:
-    """Normalize the two weather channels into the 0-1 features the MCU
-    model was trained on: sat = observed (confirmation), fc = forecast
-    (lead time)."""
-    n = weather["nasa"] or {}
+    """Normalize the weather channels into the 0-1 features the MCU model
+    was trained on: sat = observed (confirmation), fc = forecast (lead time).
+
+    Preferred: GPM IMERG Early half-hourly (~4 h latency). Fallback: NASA
+    POWER daily (1-3 day publication lag)."""
     f = weather["forecast"] or {}
+    n6 = f.get("rain_next_6h_mm") or 0.0
+    fc = round(min(1.0, max(0.0, float(n6) / HEAVY_6H_MM)), 3)
+
+    # Manual override (offline deployment) beats every auto layer
+    m = manual_sky()
+    if m:
+        obs = float(m.get("observed_mm_day") or 0.0)
+        f6 = float(m.get("forecast_mm_6h") or 0.0)
+        f24 = float(m.get("forecast_mm_24h") or 0.0)
+        return {
+            "sat": round(min(1.0, max(0.0, obs / HEAVY_DAY_MM)), 3),
+            "fc": round(min(1.0, max(0.0, max(f6 / HEAVY_6H_MM, f24 / (HEAVY_6H_MM * 4)))), 3),
+            "sat_src": "MANUAL",
+            "sat_time": time.strftime("%H:%M", time.localtime(m.get("set_at", time.time()))),
+            "sat_asof": None,
+        }
+
+    im = imerg.current_sat()
+    if im is not None:
+        return {
+            "sat": im["sat"],
+            "fc": fc,
+            "sat_src": "IMERG 30-min",
+            "sat_time": im["obs_hhmm"],
+            "sat_asof": None,
+        }
+
+    n = weather["nasa"] or {}
     days = n.get("days") or {}
     recent = 0.0
-    if days:
-        last_key = sorted(days.keys())[-1]
-        v = days.get(last_key)
-        if isinstance(v, (int, float)) and v > 0:
+    asof = None
+    # POWER daily lags: the newest keys can be fill values (-999 = no data
+    # published yet). Read the most recent day that actually has data —
+    # otherwise the confirmation channel silently reports "dry" during
+    # every publication lag.
+    for key in sorted(days.keys(), reverse=True):
+        v = days.get(key)
+        if isinstance(v, (int, float)) and v >= 0:
             recent = float(v)
-    n6 = f.get("rain_next_6h_mm") or 0.0
+            asof = key
+            break
     return {
         "sat": round(min(1.0, max(0.0, recent / HEAVY_DAY_MM)), 3),
-        "fc": round(min(1.0, max(0.0, float(n6) / HEAVY_6H_MM)), 3),
+        "fc": fc,
+        "sat_src": "POWER daily",
+        "sat_time": None,
+        "sat_asof": asof,   # YYYYMMDD of the observation sat was derived from
     }
 
 
@@ -174,6 +251,12 @@ def weather_loop() -> None:
     while True:
         weather["nasa"] = nasa_precip.fetch_nasa_precip(loc["lat"], loc["lon"])
         weather["forecast"] = open_meteo.fetch_forecast(loc["lat"], loc["lon"])
+        try:
+            r = imerg.fetch_latest()
+            if not r.get("ok"):
+                print(f"[imerg] {r.get('error')}")
+        except Exception as e:   # never break the weather loop
+            print(f"[imerg] fetch failed: {e}")
         broadcast({"type": "status", "weather": weather_public(), **engine_status_public()})
         time.sleep(300)  # NASA cache 6 h, forecast cache 15 min — poll cheaply
 
@@ -196,6 +279,8 @@ def weather_public() -> dict:
             "error": f.get("error"),
             "source": f.get("source"),
         },
+        "imerg": imerg.status(),
+        "manual": manual_sky(),
     }
 
 
@@ -242,6 +327,44 @@ class Handler(BaseHTTPRequestHandler):
                 return
             broadcast({"type": "status", "weather": weather_public(), **engine_status_public()})
             self.send_json(json.dumps(result).encode())
+        elif self.path == "/api/manual-sky":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, ValueError):
+                self.send_json(json.dumps({"error": "bad json"}).encode(), 400)
+                return
+
+            def num(key: str) -> float:
+                try:
+                    return max(0.0, float(payload.get(key) or 0))
+                except (TypeError, ValueError):
+                    return 0.0
+
+            entry = {
+                "observed_mm_day": num("observed_mm_day"),
+                "forecast_mm_6h": num("forecast_mm_6h"),
+                "forecast_mm_24h": num("forecast_mm_24h"),
+                "set_at": time.time(),
+            }
+            MANUAL_SKY_FILE.write_text(json.dumps(entry, indent=2))
+            broadcast({"type": "status", "weather": weather_public(), **engine_status_public()})
+            self.send_json(json.dumps({"ok": True, **entry}).encode())
+        elif self.path == "/api/manual-sky/clear":
+            MANUAL_SKY_FILE.unlink(missing_ok=True)
+            broadcast({"type": "status", "weather": weather_public(), **engine_status_public()})
+            self.send_json(json.dumps({"ok": True, "cleared": True}).encode())
+        elif self.path == "/api/buzz-test":
+            ser = ser_port
+            if ser is None:
+                self.send_json(json.dumps({"error": "serial not connected"}).encode(), 503)
+                return
+            try:
+                with ser_write_lock:
+                    ser.write(b"BUZZ TEST\n")
+                self.send_json(json.dumps({"ok": True, "sent": "BUZZ TEST"}).encode())
+            except (serial.SerialException, OSError) as e:
+                self.send_json(json.dumps({"error": str(e)}).encode(), 500)
         else:
             self.send_error(404)
 

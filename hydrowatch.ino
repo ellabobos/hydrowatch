@@ -9,6 +9,20 @@ DHT dht(2, DHT11);
 // Moisture sensor on analog pin A3
 const int MOISTURE_PIN = A3;
 
+// ---- Buzzer alarm on D7 (MCU-local: sounds even if Linux/network die) ----
+// BUZZER_ACTIVE=true  -> active buzzer or buzzer module (makes its own tone)
+// BUZZER_ACTIVE=false -> passive buzzer (we drive a square wave instead)
+const int BUZZER_PIN = 7;
+const bool BUZZER_ACTIVE = true;
+const int BUZZER_ON_LEVEL = HIGH;   // flip to LOW for active-low trigger modules
+
+// Alarm policy: probability must be high, SUSTAINED, and corroborated.
+const float P_ALARM_ON    = 0.70f;  // arm threshold
+const float P_ALARM_OFF   = 0.55f;  // release threshold (hysteresis, no chatter)
+const int   ARM_LOOPS     = 8;      // 8 x 0.5 s = 4 s sustained to latch
+const float RISE_ARM_MM_S = 0.1f;   // water must be moving (6 mm/min): stops a
+                                    // frozen/bench-mounted ToF from howling
+
 // ---- On-MCU flood classifier v2 (quantized forest, see model.h) ----
 // 9 features, mirroring sensor_sim.py v2:
 //   f_moisture_wet      8 s mean of (1023 - moisture_raw)
@@ -47,6 +61,12 @@ float satRain = 0.0f;
 float fcRain = 0.0f;
 bool skyReceived = false;
 
+// Buzzer alarm state
+bool alarmOn = false;
+int aboveCnt = 0;
+int patternSlot = 0;
+unsigned long testUntil = 0;   // >0 while a BUZZ TEST self-test is sounding
+
 // Serial input line buffer (non-blocking parse)
 char inBuf[64];
 int inLen = 0;
@@ -55,9 +75,22 @@ int inLen = 0;
 const float NOMINAL_TEMP_C = 22.0f;
 const float NOMINAL_HUM = 45.0f;
 
+void buzzOn() {
+  if (BUZZER_ACTIVE) digitalWrite(BUZZER_PIN, BUZZER_ON_LEVEL);
+  else tone(BUZZER_PIN, 2700);
+}
+
+void buzzOff() {
+  if (BUZZER_ACTIVE) digitalWrite(BUZZER_PIN, !BUZZER_ON_LEVEL);
+  else noTone(BUZZER_PIN);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2500);   // Zephyr boot: let the serial monitor attach
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  buzzOff();     // ensure silent at boot
 
   Modulino.begin();
 
@@ -95,6 +128,9 @@ void handleSerialInput() {
             skyReceived = true;
             Serial.println("SKY LINK UP");
           }
+        } else if (strcmp(inBuf, "BUZZ TEST") == 0) {
+          testUntil = millis() + 3000;   // 3 s sounder self-test
+          Serial.println("BUZZ TEST ACK");
         }
         inLen = 0;
       }
@@ -198,6 +234,33 @@ void loop() {
     pFlood = totalVotes > 0 ? (float)floodVotes / (float)totalVotes : 0.0f;
   }
 
+  // ---- Buzzer alarm state machine (D7) ----
+  if (pFlood < 0) {
+    aboveCnt = 0;   // warming up: silent, no arm progress
+  } else if (!alarmOn) {
+    bool corroborated = (f_water_rise >= RISE_ARM_MM_S) || (mcls == 3);
+    if (pFlood >= P_ALARM_ON && corroborated) aboveCnt++;
+    else aboveCnt = 0;
+    if (aboveCnt >= ARM_LOOPS) { alarmOn = true; patternSlot = 0; }
+  } else if (pFlood < P_ALARM_OFF) {
+    alarmOn = false;
+  }
+
+  bool testActive = millis() < testUntil;
+  if (testActive) {
+    patternSlot++;
+    buzzOn();                                        // self-test: continuous 3 s
+  } else if (alarmOn && pFlood >= 0) {
+    patternSlot++;
+    bool on;
+    if (mcls == 3) on = true;                        // debris impact: continuous siren
+    else if (mcls == 2) on = (patternSlot % 3) != 0; // flood rise: 1 s on / 0.5 s off
+    else on = (patternSlot % 4) == 1;                // other: 0.5 s on / 1.5 s off
+    if (on) buzzOn(); else buzzOff();
+  } else {
+    buzzOff();
+  }
+
   Serial.print("moisture=");
   Serial.print(moistureRaw);
   Serial.print(" | distance_mm=");
@@ -218,6 +281,8 @@ void loop() {
   Serial.print(mcls);
   Serial.print(" | imu_peak=");
   Serial.print((int)f_imu_peak);
+  Serial.print(" | buzz=");
+  Serial.print((alarmOn || millis() < testUntil) ? "on" : "off");
   Serial.print(" | sky=");
   if (skyReceived) {
     Serial.print(satRain, 2);

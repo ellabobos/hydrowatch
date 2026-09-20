@@ -10,14 +10,21 @@ Fusion logic (both signals must agree, per the project description):
                observed/forecast — automatically "verified emergency"
 """
 
+import json
 import time
+from pathlib import Path
+
+# Baseline persists across restarts: a deployment node that forgets its
+# calibration on every reboot would silently lose its ground-truth path
+# (water level AND rise-rate both require a baseline).
+_BASELINE_FILE = Path(__file__).parent / "baseline.json"
 
 
 class AlertEngine:
     def __init__(self, thresholds: dict, cooldown_s: int = 60):
         self.t = thresholds
         self.cooldown_s = cooldown_s
-        self.baseline_mm = None          # "empty streambed" reference distance
+        self.baseline_mm = self._load_baseline()  # "empty streambed" reference
         self.water_level_mm = 0.0        # water column height above baseline
         self.rise_rate_mm_s = 0.0
         self._level = "NORMAL"
@@ -29,7 +36,20 @@ class AlertEngine:
     # ---------- ground station side ----------
     def set_baseline(self, mm: float) -> dict:
         self.baseline_mm = mm
+        try:
+            _BASELINE_FILE.write_text(
+                json.dumps({"baseline_mm": mm, "t": time.time()}, indent=2)
+            )
+        except OSError:
+            pass  # persistence is best-effort; live value still works
         return {"baseline_mm": self.baseline_mm}
+
+    @staticmethod
+    def _load_baseline() -> float | None:
+        try:
+            return float(json.loads(_BASELINE_FILE.read_text())["baseline_mm"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
     def _water_level(self, distance_mm: float) -> float:
         """Water column = baseline distance minus current distance."""
@@ -60,10 +80,22 @@ class AlertEngine:
         rain_24h = (forecast.get("rain_next_24h_mm") or 0.0)
         rain_6h = (forecast.get("rain_next_6h_mm") or 0.0)
 
+        # A single heavy observed day counts too (fill-value aware: POWER
+        # lags by days; manual entry provides one day). Mirrors the model's
+        # sat semantics instead of requiring a 7-day total.
+        recent_day = 0.0
+        days = nasa.get("days") or {}
+        for key in sorted(days.keys(), reverse=True):
+            v = days.get(key)
+            if isinstance(v, (int, float)) and v >= 0:
+                recent_day = float(v)
+                break
+
         sky_wet = (
             rain_24h >= th["forecast_rain_24h_mm"]
             or rain_6h >= th["forecast_rain_24h_mm"] / 4
             or rain_window >= th["heavy_rain_mm_per_day"] * th["rains_days_window"] / 2
+            or recent_day >= th["heavy_rain_mm_per_day"]
         )
 
         rising_fast = (

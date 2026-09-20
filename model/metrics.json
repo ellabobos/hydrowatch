@@ -1,0 +1,25 @@
+{
+  "best_variant": "standalone",
+  "teacher_test_accuracy": 0.9979166666666667,
+  "student_distilled_macro_f1": 0.9983505826890513,
+  "student_standalone_macro_f1": 0.9986479190930073,
+  "train_rows": 25920,
+  "test_rows": 10080,
+  "feature_order": [
+    "f_moisture_wet",
+    "f_moisture_slope",
+    "f_dist_mm",
+    "f_water_rise_mm_s",
+    "f_temp_c",
+    "f_humidity",
+    "f_imu_peak_mg",
+    "f_sat_rain",
+    "f_fc_rain"
+  ],
+  "class_names": [
+    "normal",
+    "rain_approach",
+    "flood_rise",
+    "debris_impact"
+  ]
+}

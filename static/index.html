@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HydroWatch — Flood Prediction Node</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>HydroWatch</h1>
+    <div class="header-right">
+      <div id="node-name" class="node-name"></div>
+      <div id="status" class="status connecting">
+        <span class="dot"></span><span id="status-text">connecting…</span>
+      </div>
+    </div>
+  </header>
+
+  <div id="alert-banner" class="banner hidden">
+    <span id="alert-banner-level"></span>
+    <span id="alert-banner-text"></span>
+  </div>
+
+  <main>
+    <section class="cards">
+      <div class="card water">
+        <div class="label">Water level</div>
+        <div class="value"><span id="water-level">–</span><span class="unit">mm</span></div>
+        <div class="sub">rise rate: <span id="rise-rate">–</span> mm/s · baseline: <span id="baseline">–</span> mm</div>
+        <div class="btn-row">
+          <button class="small" id="btn-baseline">Capture baseline</button>
+        </div>
+      </div>
+      <div class="card moisture">
+        <div class="label">Soil moisture (A3)</div>
+        <div class="value"><span id="moisture">–</span><span class="unit">/ 1023</span></div>
+        <div class="bar"><div id="moisture-bar" class="fill"></div></div>
+      </div>
+      <div class="card distance">
+        <div class="label">Distance to water</div>
+        <div class="value"><span id="distance">–</span><span class="unit">mm</span></div>
+        <div class="bar"><div id="distance-bar" class="fill"></div></div>
+      </div>
+      <div class="card humidity">
+        <div class="label">Air humidity (DHT11)</div>
+        <div class="value"><span id="humidity">–</span><span class="unit">%</span></div>
+        <div class="sub">0–100 %RH</div>
+      </div>
+      <div class="card temp">
+        <div class="label">Temperature (DHT11)</div>
+        <div class="value"><span id="temp">–</span><span class="unit">°C</span></div>
+        <div class="sub">DHT11 accuracy ±2 °C</div>
+      </div>
+      <div class="card nasa">
+        <div class="label">NASA POWER · 7-day precip</div>
+        <div class="value"><span id="nasa-7d">–</span><span class="unit">mm</span></div>
+        <div class="sub" id="nasa-detail">satellite telemetry</div>
+      </div>
+      <div class="card forecast">
+        <div class="label">Forecast · next 24 h</div>
+        <div class="value"><span id="fc-24h">–</span><span class="unit">mm</span></div>
+        <div class="sub">next 6 h: <span id="fc-6h">–</span> mm</div>
+      </div>
+      <div class="card manual">
+        <div class="label">Sky input · manual (offline mode)</div>
+        <div class="sub" id="manual-status">checking…</div>
+        <div class="manual-form">
+          <label>obs mm/24h<input id="m-obs" type="number" min="0" step="0.1" placeholder="0"></label>
+          <label>fc mm/6h<input id="m-fc6" type="number" min="0" step="0.1" placeholder="0"></label>
+          <label>fc mm/24h<input id="m-fc24" type="number" min="0" step="0.1" placeholder="0"></label>
+        </div>
+        <div class="btn-row">
+          <button class="small" id="btn-manual-apply">Apply manual sky</button>
+          <button class="small" id="btn-manual-clear">Clear</button>
+        </div>
+      </div>
+      <div class="card accel">
+        <div class="label">Movement (IMU)</div>
+        <div class="value accel-grid">
+          <span id="ax">–</span><span id="ay">–</span><span id="az">–</span>
+        </div>
+        <div class="sub">milli-g (X / Y / Z) · peak <span id="imu-peak">–</span> mg</div>
+      </div>
+      <div class="card ml">
+        <div class="label">ML flood probability</div>
+        <div class="value"><span id="p-flood">–</span><span class="unit">%</span></div>
+        <div class="bar"><div id="ml-bar" class="fill"></div></div>
+        <div class="sub">on-MCU model: <span id="mcls">–</span></div>
+        <div class="sub">buzzer (D7): <span id="buzz">–</span></div>
+        <div class="btn-row">
+          <button class="small" id="btn-buzz-test">Test alarm</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="label">Samples received</div>
+        <div class="value"><span id="count">0</span></div>
+        <div class="sub">last update: <span id="last-update">–</span></div>
+      </div>
+    </section>
+
+    <section class="charts">
+      <div class="chart-box">
+        <h2>Water level — last 60 s</h2>
+        <canvas id="water-chart" width="720" height="220"></canvas>
+      </div>
+      <div class="chart-box">
+        <h2>Distance to water — last 60 s</h2>
+        <canvas id="distance-chart" width="720" height="220"></canvas>
+      </div>
+      <div class="chart-box">
+        <h2>Soil moisture — last 60 s</h2>
+        <canvas id="moisture-chart" width="720" height="220"></canvas>
+      </div>
+      <div class="chart-box">
+        <h2>Motion — magnitude of acceleration, last 60 s</h2>
+        <canvas id="motion-chart" width="720" height="220"></canvas>
+      </div>
+      <div class="chart-box">
+        <h2>ML flood probability — last 60 s</h2>
+        <canvas id="ml-chart" width="720" height="220"></canvas>
+      </div>
+      <div class="chart-box">
+        <h2>Humidity — last 60 s</h2>
+        <canvas id="humidity-chart" width="720" height="220"></canvas>
+      </div>
+      <div class="chart-box">
+        <h2>Temperature — last 60 s</h2>
+        <canvas id="temp-chart" width="720" height="220"></canvas>
+      </div>
+    </section>
+
+    <section class="alerts-box">
+      <h2>Alert log</h2>
+      <div id="alert-log" class="alert-log"><div class="muted">no alerts yet</div></div>
+    </section>
+  </main>
+
+  <footer>HydroWatch open-source flood node · Arduino UNO Q · NASA POWER satellite precipitation · local ground stream</footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
