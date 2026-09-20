@@ -43,13 +43,18 @@ LINE_RE = re.compile(
     r"(?:\s*\|\s*ax=(-?\d+))?"
     r"(?:\s*\|\s*ay=(-?\d+))?"
     r"(?:\s*\|\s*az=(-?\d+))?"
+    r"(?:\s*\|\s*p_flood=(-?\d+(?:\.\d+)?))?"
+    r"(?:\s*\|\s*mcls=(-?\d+))?"
 )
 
 latest = {
     "moisture": None, "distance_mm": None, "humidity": None, "temp_c": None,
     "ax": None, "ay": None, "az": None, "t": None,
+    "p_flood": None, "mcls": None,
 }
 serial_ok = False
+ser_port = None          # shared handle so sky_writer can talk to the MCU
+ser_write_lock = threading.Lock()
 subscribers = set()
 subs_lock = threading.Lock()
 
@@ -71,11 +76,13 @@ def broadcast(msg: dict) -> None:
 
 
 def serial_reader() -> None:
-    global serial_ok
+    global serial_ok, ser_port
     buf = b""
     while True:
         try:
             with serial.Serial(SERIAL_CFG["port"], SERIAL_CFG["baud"], timeout=1) as ser:
+                with ser_write_lock:
+                    ser_port = ser
                 serial_ok = True
                 print(f"[serial] connected to {SERIAL_CFG['port']} @ {SERIAL_CFG['baud']}")
                 while True:
@@ -96,6 +103,8 @@ def serial_reader() -> None:
                             "ax": int(m.group(5)) if m.group(5) is not None else None,
                             "ay": int(m.group(6)) if m.group(6) is not None else None,
                             "az": int(m.group(7)) if m.group(7) is not None else None,
+                            "p_flood": float(m.group(8)) if m.group(8) is not None else None,
+                            "mcls": int(m.group(9)) if m.group(9) is not None else None,
                             "t": time.time(),
                         }
                         latest.update(sample)
@@ -103,6 +112,7 @@ def serial_reader() -> None:
                         broadcast({"type": "sample", **sample, **engine_status_public()})
         except (serial.SerialException, OSError) as e:
             serial_ok = False
+            ser_port = None
             print(f"[serial] {SERIAL_CFG['port']} unavailable ({e}); retrying in 3 s")
             time.sleep(3)
 
@@ -114,7 +124,49 @@ def engine_status_public() -> dict:
         "alert_reasons": st["reasons"],
         "water_level_mm": st["water_level_mm"],
         "rise_rate_mm_s": st["rise_rate_mm_s"],
+        "sky": latest.get("sky"),
     }
+
+
+# Normalization anchors — must mirror sensor_sim.py's rain feature scaling
+HEAVY_DAY_MM = 15.0   # observed satellite rain: 15 mm/day -> sat = 1.0
+HEAVY_6H_MM = 10.0    # forecast rain: 10 mm in 6 h -> fc = 1.0
+
+
+def compute_sky() -> dict:
+    """Normalize the two weather channels into the 0-1 features the MCU
+    model was trained on: sat = observed (confirmation), fc = forecast
+    (lead time)."""
+    n = weather["nasa"] or {}
+    f = weather["forecast"] or {}
+    days = n.get("days") or {}
+    recent = 0.0
+    if days:
+        last_key = sorted(days.keys())[-1]
+        v = days.get(last_key)
+        if isinstance(v, (int, float)) and v > 0:
+            recent = float(v)
+    n6 = f.get("rain_next_6h_mm") or 0.0
+    return {
+        "sat": round(min(1.0, max(0.0, recent / HEAVY_DAY_MM)), 3),
+        "fc": round(min(1.0, max(0.0, float(n6) / HEAVY_6H_MM)), 3),
+    }
+
+
+def sky_writer() -> None:
+    """Push normalized rain features down the serial line to the MCU
+    every 60 s (also re-primes a freshly rebooted board)."""
+    while True:
+        sky = compute_sky()
+        latest["sky"] = sky
+        ser = ser_port
+        if ser is not None:
+            try:
+                with ser_write_lock:
+                    ser.write(f"SKY sat={sky['sat']} fc={sky['fc']}\n".encode())
+            except (serial.SerialException, OSError):
+                pass
+        time.sleep(60)
 
 
 def weather_loop() -> None:
@@ -248,6 +300,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     threading.Thread(target=serial_reader, daemon=True).start()
     threading.Thread(target=weather_loop, daemon=True).start()
+    threading.Thread(target=sky_writer, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), Handler)
     print(f"[http] HydroWatch node at http://127.0.0.1:{HTTP_PORT}")
     try:
